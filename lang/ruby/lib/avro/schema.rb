@@ -50,7 +50,7 @@ module Avro
 
         type_sym = type.to_sym
         if PRIMITIVE_TYPES_SYM.include?(type_sym)
-          return PrimitiveSchema.new(type_sym)
+          return PrimitiveSchema.new(type_sym, json_obj)
 
         elsif NAMED_TYPES_SYM.include? type_sym
           name = json_obj['name']
@@ -58,13 +58,13 @@ module Avro
           case type_sym
           when :fixed
             size = json_obj['size']
-            return FixedSchema.new(name, namespace, size, names)
+            return FixedSchema.new(name, namespace, size, names, json_obj)
           when :enum
             symbols = json_obj['symbols']
-            return EnumSchema.new(name, namespace, symbols, names)
+            return EnumSchema.new(name, namespace, symbols, names, json_obj)
           when :record, :error
             fields = json_obj['fields']
-            return RecordSchema.new(name, namespace, fields, names, type_sym)
+            return RecordSchema.new(name, namespace, fields, names, type_sym, json_obj)
           else
             raise SchemaParseError.new("Unknown named type: #{type}")
           end
@@ -72,9 +72,9 @@ module Avro
         else
           case type_sym
           when :array
-            return ArraySchema.new(json_obj['items'], names, default_namespace)
+            return ArraySchema.new(json_obj['items'], names, default_namespace, json_obj)
           when :map
-            return MapSchema.new(json_obj['values'], names, default_namespace)
+            return MapSchema.new(json_obj['values'], names, default_namespace, json_obj)
           else
             raise SchemaParseError.new("Unknown Valid Type: #{type}")
           end
@@ -127,8 +127,9 @@ module Avro
       end
     end
 
-    def initialize(type)
+    def initialize(type, options)
       @type_sym = type.is_a?(Symbol) ? type : type.to_sym
+      @options = options
     end
 
     attr_reader :type_sym
@@ -179,10 +180,14 @@ module Avro
       MultiJson.dump to_avro
     end
 
+    def aliases
+      @options.fetch('aliases', [])
+    end
+
     class NamedSchema < Schema
       attr_reader :name, :namespace
-      def initialize(type, name, namespace=nil, names=nil)
-        super(type)
+      def initialize(type, name, namespace=nil, names=nil, options)
+        super(type, options)
         @name, @namespace = Name.extract_namespace(name, namespace)
         names = Name.add_name(names, self)
       end
@@ -213,7 +218,7 @@ module Avro
             name = field['name']
             default = field['default']
             order = field['order']
-            new_field = Field.new(type, name, default, order, names, namespace)
+            new_field = Field.new(type, name, default, order, names, namespace, field)
             # make sure field name has not been used yet
             if field_names.include?(new_field.name)
               raise SchemaParseError, "Field name #{new_field.name.inspect} is already in use"
@@ -227,12 +232,13 @@ module Avro
         field_objects
       end
 
-      def initialize(name, namespace, fields, names=nil, schema_type=:record)
+      def initialize(name, namespace, fields, names=nil, schema_type=:record, options)
         if schema_type == :request || schema_type == 'request'
           @type_sym = schema_type.to_sym
           @namespace = namespace
+          @options = options
         else
-          super(schema_type, name, namespace, names)
+          super(schema_type, name, namespace, names, options)
         end
         @fields = RecordSchema.make_field_objects(fields, names, self.namespace)
       end
@@ -256,8 +262,8 @@ module Avro
     class ArraySchema < Schema
       attr_reader :items
 
-      def initialize(items, names=nil, default_namespace=nil)
-        super(:array)
+      def initialize(items, names=nil, default_namespace=nil, options)
+        super(:array, options)
         @items = subparse(items, names, default_namespace)
       end
 
@@ -269,8 +275,8 @@ module Avro
     class MapSchema < Schema
       attr_reader :values
 
-      def initialize(values, names=nil, default_namespace=nil)
-        super(:map)
+      def initialize(values, names=nil, default_namespace=nil, options)
+        super(:map, options)
         @values = subparse(values, names, default_namespace)
       end
 
@@ -282,8 +288,8 @@ module Avro
     class UnionSchema < Schema
       attr_reader :schemas
 
-      def initialize(schemas, names=nil, default_namespace=nil)
-        super(:union)
+      def initialize(schemas, names=nil, default_namespace=nil, options = {})
+        super(:union, options)
 
         schema_objects = []
         schemas.each_with_index do |schema, i|
@@ -310,12 +316,12 @@ module Avro
 
     class EnumSchema < NamedSchema
       attr_reader :symbols
-      def initialize(name, space, symbols, names=nil)
+      def initialize(name, space, symbols, names=nil, options)
         if symbols.uniq.length < symbols.length
           fail_msg = 'Duplicate symbol: %s' % symbols
           raise Avro::SchemaParseError, fail_msg
         end
-        super(:enum, name, space, names)
+        super(:enum, name, space, names, options)
         @symbols = symbols
       end
 
@@ -327,11 +333,11 @@ module Avro
 
     # Valid primitive types are in PRIMITIVE_TYPES.
     class PrimitiveSchema < Schema
-      def initialize(type)
+      def initialize(type, options = {})
         if PRIMITIVE_TYPES_SYM.include?(type)
-          super(type)
+          super(type, options)
         elsif PRIMITIVE_TYPES.include?(type)
-          super(type.to_sym)
+          super(type.to_sym, options)
         else
           raise AvroError.new("#{type} is not a valid primitive type.")
         end
@@ -345,12 +351,12 @@ module Avro
 
     class FixedSchema < NamedSchema
       attr_reader :size
-      def initialize(name, space, size, names=nil)
+      def initialize(name, space, size, names=nil, options)
         # Ensure valid cto args
         unless size.is_a?(Fixnum) || size.is_a?(Bignum)
           raise AvroError, 'Fixed Schema requires a valid integer for size property.'
         end
-        super(:fixed, name, space, names)
+        super(:fixed, name, space, names, options)
         @size = size
       end
 
@@ -363,11 +369,12 @@ module Avro
     class Field < Schema
       attr_reader :type, :name, :default, :order
 
-      def initialize(type, name, default=nil, order=nil, names=nil, namespace=nil)
+      def initialize(type, name, default=nil, order=nil, names=nil, namespace=nil, options)
         @type = subparse(type, names, namespace)
         @name = name
         @default = default
         @order = order
+        @options = options
       end
 
       def to_avro(names=Set.new)
